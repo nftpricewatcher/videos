@@ -120,7 +120,7 @@ HTML = """
     <div class="file-list" id="fileList"></div>
 
 <script>
-const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB chunks to browser
+const CHUNK_SIZE = 500 * 1024 * 1024; // 500MB chunks to browser
 
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
