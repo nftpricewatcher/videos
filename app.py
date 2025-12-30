@@ -251,41 +251,20 @@ async function downloadFile(id, filename, size) {
     progressContainer.style.display = 'block';
     progressBar.style.width = '0%';
     progressText.textContent = `Preparing download for ${filename}...`;
-    uploadStatus.textContent = 'Fetching from Telegram...';
+    uploadStatus.textContent = 'Fetching chunks from Telegram and reassembling... This may take a few minutes for large files.';
     
-    try {
-        const response = await fetch(`/api/download/${id}`);
-        if (!response.ok) throw new Error('Download failed');
-        
-        const reader = response.body.getReader();
-        const chunks = [];
-        let received = 0;
-        
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            received += value.length;
-            const pct = (received / size * 100).toFixed(1);
-            progressBar.style.width = pct + '%';
-            progressText.textContent = `Downloading ${filename}: ${pct}% (${formatSize(received)} / ${formatSize(size)})`;
-        }
-        
-        const blob = new Blob(chunks);
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-        
-        showStatus(`✅ Downloaded ${filename}`, 'success');
-    } catch (err) {
-        showStatus(`❌ Download failed: ${err.message}`, 'error');
-    }
+    // Use an iframe to trigger download so we can show status
+    const link = document.createElement('a');
+    link.href = `/api/download/${id}`;
+    link.download = filename;
+    link.click();
     
-    progressContainer.style.display = 'none';
-    uploadStatus.textContent = '';
+    // Show completion after estimated time (rough estimate)
+    setTimeout(() => {
+        progressContainer.style.display = 'none';
+        uploadStatus.textContent = '';
+        showStatus(`✅ Download started for ${filename}`, 'success');
+    }, 2000);
 }
 
 async function deleteFile(id) {
@@ -398,7 +377,7 @@ def finalize_upload():
 
 @app.route('/api/download/<int:file_id>')
 def download(file_id):
-    """Stream download - fetch chunks from Telegram and stream to browser"""
+    """Download file - fetch all chunks from Telegram, combine, and send"""
     storage = get_storage()
     
     file_info = storage._q("SELECT filename, original_size FROM files WHERE id = ?", (file_id,), fetch='one')
@@ -411,46 +390,31 @@ def download(file_id):
         (file_id,), fetch='all'
     )
     
-    def generate():
-        async def stream_chunks():
-            s = get_storage()
-            await s.start()
-            try:
+    # Download all chunks and combine into single file
+    output_path = Path(f"/tmp/downloads/{file_id}_{filename}")
+    
+    async def download_all_chunks():
+        s = get_storage()
+        await s.start()
+        try:
+            with open(output_path, 'wb') as out:
                 for msg_id, idx in chunks:
+                    print(f"Downloading chunk {idx + 1}/{len(chunks)} for {filename}")
                     msg = await s.client.get_messages(s.channel_id, ids=msg_id)
-                    # Download to temp file
                     temp_path = f"/tmp/downloads/chunk_{file_id}_{idx}"
                     await s.client.download_media(msg, file=temp_path)
                     
-                    # Read and yield
-                    with open(temp_path, 'rb') as f:
-                        while True:
-                            data = f.read(8192)
-                            if not data:
-                                break
-                            yield data
+                    with open(temp_path, 'rb') as chunk_file:
+                        out.write(chunk_file.read())
                     
                     Path(temp_path).unlink()
-            finally:
-                await s.stop()
-        
-        # Run async generator
-        loop = asyncio.new_event_loop()
-        gen = stream_chunks()
-        try:
-            while True:
-                chunk = loop.run_until_complete(gen.__anext__())
-                yield chunk
-        except StopAsyncIteration:
-            pass
+            print(f"Download complete: {filename}")
         finally:
-            loop.close()
+            await s.stop()
     
-    return Response(
-        generate(),
-        mimetype='application/octet-stream',
-        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
-    )
+    run_async(download_all_chunks())
+    
+    return send_file(output_path, as_attachment=True, download_name=filename)
 
 @app.route('/api/delete/<int:file_id>', methods=['DELETE'])
 def delete(file_id):
