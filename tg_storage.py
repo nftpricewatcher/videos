@@ -42,6 +42,9 @@ class TelegramStorage:
             cur.execute("""CREATE TABLE IF NOT EXISTS chunks (
                 id SERIAL PRIMARY KEY, file_id INTEGER REFERENCES files(id),
                 chunk_index INTEGER, message_id BIGINT, size BIGINT)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS pending_chunks (
+                id SERIAL PRIMARY KEY, upload_id TEXT, filename TEXT, total_size BIGINT,
+                total_chunks INTEGER, chunk_index INTEGER, message_id BIGINT, chunk_size BIGINT)""")
         else:
             import sqlite3
             self.db = sqlite3.connect("files.db", check_same_thread=False)
@@ -52,6 +55,9 @@ class TelegramStorage:
             self.db.execute("""CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY, file_id INTEGER, chunk_index INTEGER,
                 message_id INTEGER, size INTEGER, FOREIGN KEY (file_id) REFERENCES files(id))""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pending_chunks (
+                id INTEGER PRIMARY KEY, upload_id TEXT, filename TEXT, total_size INTEGER,
+                total_chunks INTEGER, chunk_index INTEGER, message_id INTEGER, chunk_size INTEGER)""")
             self.db.commit()
     
     def _q(self, query, params=(), fetch=None):
