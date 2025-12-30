@@ -185,14 +185,16 @@ async function uploadFile(file) {
                 // When browser→Railway upload completes, start fake progress animation
                 xhr.upload.onload = () => {
                     const chunkShare = 100 / totalChunks;
-                    const baseProgress = (i * chunkShare) + (chunkShare / 2); // End of Railway portion
-                    const targetProgress = ((i + 1) * chunkShare) - 1; // Almost end of this chunk's TG portion
+                    const baseProgress = (i * chunkShare) + (chunkShare / 2);
+                    const targetProgress = ((i + 1) * chunkShare) - 0.5;
                     fakeProgress = baseProgress;
                     const progressRange = targetProgress - baseProgress;
                     
-                    // 1.9GB takes ~6-7 min = ~400 seconds
-                    const incrementPerTick = progressRange / 400;
-                    const tickInterval = 1000;
+                    // TG uploads at ~4 MB/s - calculate expected time for this chunk
+                    const chunkBytes = Math.min(CHUNK_SIZE, file.size - (i * CHUNK_SIZE));
+                    const tgSpeedBps = 4 * 1024 * 1024; // 4 MB/s
+                    const expectedSeconds = Math.max(5, chunkBytes / tgSpeedBps);
+                    const incrementPerTick = progressRange / expectedSeconds;
                     
                     $('statusText').className = 'telegram';
                     
@@ -204,10 +206,11 @@ async function uploadFile(file) {
                             $('progressBar').style.width = fakeProgress.toFixed(1) + '%';
                             $('progressPercent').textContent = fakeProgress.toFixed(1) + '%';
                         }
-                        const mins = Math.floor(elapsed / 60);
-                        const secs = elapsed % 60;
-                        $('statusText').textContent = `📤 Sending chunk ${i + 1}/${totalChunks} to Telegram... ${mins}:${secs.toString().padStart(2, '0')} elapsed`;
-                    }, tickInterval);
+                        const remaining = Math.max(0, Math.round(expectedSeconds - elapsed));
+                        const remMins = Math.floor(remaining / 60);
+                        const remSecs = remaining % 60;
+                        $('statusText').textContent = `📤 Sending to Telegram... ~${remMins}:${remSecs.toString().padStart(2, '0')} left`;
+                    }, 1000);
                 };
                 
                 xhr.onload = () => {
@@ -294,12 +297,12 @@ async function downloadFile(id, filename, size, numChunks) {
     $('statusText').className = 'telegram';
     
     // Phase 1: Server fetches all chunks from TG (0-80% fake progress)
-    // ~5 min per chunk to download from TG
+    // TG downloads at ~4 MB/s
     let fakeProgress = 0;
     const tgFetchTarget = 80;
-    const secondsPerChunk = 300;
-    const totalFetchTime = numChunks * secondsPerChunk;
-    const incrementPerTick = tgFetchTarget / totalFetchTime;
+    const tgSpeedBps = 4 * 1024 * 1024; // 4 MB/s
+    const expectedTotalSeconds = Math.max(5, size / tgSpeedBps);
+    const incrementPerTick = tgFetchTarget / expectedTotalSeconds;
     let elapsed = 0;
     
     const fakeInterval = setInterval(() => {
@@ -309,10 +312,10 @@ async function downloadFile(id, filename, size, numChunks) {
             $('progressBar').style.width = fakeProgress.toFixed(1) + '%';
             $('progressPercent').textContent = fakeProgress.toFixed(1) + '%';
         }
-        const mins = Math.floor(elapsed / 60);
-        const secs = elapsed % 60;
-        const currentChunk = Math.min(Math.floor(elapsed / secondsPerChunk) + 1, numChunks);
-        $('statusText').textContent = `⬇️ Preparing: chunk ${currentChunk}/${numChunks} (TG → Server)... ${mins}:${secs.toString().padStart(2, '0')}`;
+        const remaining = Math.max(0, Math.round(expectedTotalSeconds - elapsed));
+        const remMins = Math.floor(remaining / 60);
+        const remSecs = remaining % 60;
+        $('statusText').textContent = `⬇️ Fetching from Telegram... ~${remMins}:${remSecs.toString().padStart(2, '0')} left`;
     }, 1000);
     
     try {
