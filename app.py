@@ -19,8 +19,6 @@ app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
 Path(app.config['UPLOAD_FOLDER']).mkdir(exist_ok=True)
 Path('/tmp/downloads').mkdir(exist_ok=True)
 
-uploads_in_progress = {}
-
 _loop = None
 _loop_thread = None
 
@@ -190,9 +188,9 @@ async function uploadFile(file) {
                     fakeProgress = baseProgress;
                     const progressRange = targetProgress - baseProgress;
                     
-                    // TG uploads at ~4 MB/s - calculate expected time for this chunk
+                    // TG uploads at ~3 MB/s - calculate expected time for this chunk
                     const chunkBytes = Math.min(CHUNK_SIZE, file.size - (i * CHUNK_SIZE));
-                    const tgSpeedBps = 4 * 1024 * 1024; // 4 MB/s
+                    const tgSpeedBps = 3 * 1024 * 1024; // 3 MB/s
                     const expectedSeconds = Math.max(5, chunkBytes / tgSpeedBps);
                     const incrementPerTick = progressRange / expectedSeconds;
                     
@@ -297,10 +295,10 @@ async function downloadFile(id, filename, size, numChunks) {
     $('statusText').className = 'telegram';
     
     // Phase 1: Server fetches all chunks from TG (0-80% fake progress)
-    // TG downloads at ~4 MB/s
+    // TG downloads at ~3 MB/s
     let fakeProgress = 0;
     const tgFetchTarget = 80;
-    const tgSpeedBps = 4 * 1024 * 1024; // 4 MB/s
+    const tgSpeedBps = 3 * 1024 * 1024; // 3 MB/s
     const expectedTotalSeconds = Math.max(5, size / tgSpeedBps);
     const incrementPerTick = tgFetchTarget / expectedTotalSeconds;
     let elapsed = 0;
@@ -405,10 +403,6 @@ def upload_chunk():
     total_size = int(request.form['total_size'])
     chunk = request.files['chunk']
     
-    if upload_id not in uploads_in_progress:
-        uploads_in_progress[upload_id] = {'filename': filename, 'total_size': total_size, 'total_chunks': total_chunks, 'tg_chunks': []}
-    
-    upload = uploads_in_progress[upload_id]
     chunk_path = Path(app.config['UPLOAD_FOLDER']) / f"{upload_id}_{chunk_index}"
     chunk.save(chunk_path)
     chunk_size = chunk_path.stat().st_size
@@ -433,24 +427,42 @@ def upload_chunk():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     
-    upload['tg_chunks'].append((chunk_index, msg_id, chunk_size))
+    # Store in database instead of memory (works across workers)
+    storage = get_storage()
+    storage._q(
+        "INSERT INTO pending_chunks (upload_id, filename, total_size, total_chunks, chunk_index, message_id, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (upload_id, filename, total_size, total_chunks, chunk_index, msg_id, chunk_size)
+    )
+    
     return jsonify({'status': 'ok', 'chunk': chunk_index + 1, 'total': total_chunks})
 
 @app.route('/api/upload/finalize', methods=['POST'])
 def finalize_upload():
     upload_id = request.json['upload_id']
-    if upload_id not in uploads_in_progress:
+    storage = get_storage()
+    
+    # Get all chunks for this upload from database
+    chunks = storage._q(
+        "SELECT filename, total_size, chunk_index, message_id, chunk_size FROM pending_chunks WHERE upload_id = ? ORDER BY chunk_index",
+        (upload_id,), fetch='all'
+    )
+    
+    if not chunks:
         return jsonify({'error': 'Upload not found'}), 404
     
-    upload = uploads_in_progress[upload_id]
-    upload['tg_chunks'].sort(key=lambda x: x[0])
+    filename = chunks[0][0]
+    total_size = chunks[0][1]
     
-    storage = get_storage()
-    file_id = storage._insert_id("INSERT INTO files (filename, original_size, hash) VALUES (?, ?, ?)", (upload['filename'], upload['total_size'], upload_id))
-    for idx, msg_id, size in upload['tg_chunks']:
-        storage._q("INSERT INTO chunks (file_id, chunk_index, message_id, size) VALUES (?, ?, ?, ?)", (file_id, idx, msg_id, size))
+    # Create file record
+    file_id = storage._insert_id("INSERT INTO files (filename, original_size, hash) VALUES (?, ?, ?)", (filename, total_size, upload_id))
     
-    del uploads_in_progress[upload_id]
+    # Create chunk records
+    for _, _, chunk_idx, msg_id, size in chunks:
+        storage._q("INSERT INTO chunks (file_id, chunk_index, message_id, size) VALUES (?, ?, ?, ?)", (file_id, chunk_idx, msg_id, size))
+    
+    # Clean up pending chunks
+    storage._q("DELETE FROM pending_chunks WHERE upload_id = ?", (upload_id,))
+    
     return jsonify({'file_id': file_id})
 
 @app.route('/api/download/prepare/<int:file_id>', methods=['POST'])
