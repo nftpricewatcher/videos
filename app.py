@@ -78,6 +78,8 @@ HTML = """
         .stat-value { font-size: 28px; font-weight: 700; color: #0088cc; }
         .stat-label { color: #888; margin-top: 5px; }
         #statusText { text-align: center; color: #aaa; margin-top: 12px; min-height: 24px; font-size: 14px; }
+        #statusText.telegram { color: #00aaff; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
 </head>
 <body>
@@ -159,6 +161,7 @@ async function uploadFile(file) {
                 
                 xhr.upload.onprogress = e => {
                     if (e.lengthComputable) {
+                        $('statusText').className = ''; // Remove telegram animation
                         const chunkProgress = e.loaded / e.total;
                         const overallProgress = (i + chunkProgress * 0.5) / totalChunks; // 50% for upload to Railway
                         const pct = (overallProgress * 100).toFixed(1);
@@ -174,10 +177,11 @@ async function uploadFile(file) {
                 
                 xhr.onload = () => {
                     if (xhr.status === 200) {
-                        // Phase 2: Show Telegram upload status
+                        // Phase 2: Show Telegram upload status with animation
                         const overallProgress = (i + 0.5) / totalChunks;
                         $('progressBar').style.width = (overallProgress * 100).toFixed(1) + '%';
-                        $('statusText').textContent = `📤 Chunk ${i + 1}/${totalChunks} → Telegram... (please wait)`;
+                        $('statusText').className = 'telegram';
+                        $('statusText').textContent = `📤 Sending chunk ${i + 1}/${totalChunks} to Telegram... (this takes a minute)`;
                         resolve(JSON.parse(xhr.response));
                     } else {
                         reject(new Error(xhr.responseText || 'Upload failed'));
@@ -189,6 +193,7 @@ async function uploadFile(file) {
             });
             
             // Update after TG upload complete
+            $('statusText').className = '';
             const overallProgress = (i + 1) / totalChunks;
             $('progressBar').style.width = (overallProgress * 100).toFixed(1) + '%';
             $('progressPercent').textContent = (overallProgress * 100).toFixed(1) + '%';
@@ -210,6 +215,7 @@ async function uploadFile(file) {
     }
     
     $('statusText').textContent = '';
+    $('statusText').className = '';
     $('progressContainer').style.display = 'none';
 }
 
@@ -396,12 +402,13 @@ def download(file_id):
 
 @app.route('/api/delete/<int:file_id>', methods=['DELETE'])
 def delete(file_id):
-    run_async((lambda: get_storage())() and None or (asyncio.coroutine(lambda: None))())
     async def do_del():
         s = get_storage()
         await s.start()
-        try: await s.delete(file_id)
-        finally: await s.stop()
+        try:
+            await s.delete(file_id)
+        finally:
+            await s.stop()
     run_async(do_del())
     return jsonify({'deleted': file_id})
 
