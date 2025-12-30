@@ -166,8 +166,12 @@ async function uploadFile(file) {
                     if (e.lengthComputable) {
                         $('statusText').className = '';
                         const chunkProgress = e.loaded / e.total;
-                        const overallProgress = (i + chunkProgress * 0.5) / totalChunks;
-                        const pct = (overallProgress * 100).toFixed(1);
+                        // Each chunk gets equal share: chunk 0 = 0-50%, chunk 1 = 50-100% for 2 chunks
+                        // Within each chunk: first half is Railway, second half is TG
+                        const chunkShare = 100 / totalChunks; // e.g., 50% per chunk if 2 chunks
+                        const railwayPortion = chunkShare / 2; // e.g., 25% for Railway part
+                        const overallProgress = (i * chunkShare) + (chunkProgress * railwayPortion);
+                        const pct = overallProgress.toFixed(1);
                         $('progressBar').style.width = pct + '%';
                         $('progressPercent').textContent = pct + '%';
                         
@@ -180,20 +184,30 @@ async function uploadFile(file) {
                 
                 // When browser→Railway upload completes, start fake progress animation
                 xhr.upload.onload = () => {
-                    const baseProgress = (i + 0.5) / totalChunks * 100;
-                    const targetProgress = (i + 0.95) / totalChunks * 100;
+                    const chunkShare = 100 / totalChunks;
+                    const baseProgress = (i * chunkShare) + (chunkShare / 2); // End of Railway portion
+                    const targetProgress = ((i + 1) * chunkShare) - 1; // Almost end of this chunk's TG portion
                     fakeProgress = baseProgress;
+                    const progressRange = targetProgress - baseProgress;
+                    
+                    // 1.9GB takes ~6-7 min = ~400 seconds
+                    const incrementPerTick = progressRange / 400;
+                    const tickInterval = 1000;
                     
                     $('statusText').className = 'telegram';
-                    $('statusText').textContent = `📤 Sending chunk ${i + 1}/${totalChunks} to Telegram...`;
                     
+                    let elapsed = 0;
                     tgInterval = setInterval(() => {
+                        elapsed++;
                         if (fakeProgress < targetProgress) {
-                            fakeProgress += 0.2;
+                            fakeProgress += incrementPerTick;
                             $('progressBar').style.width = fakeProgress.toFixed(1) + '%';
                             $('progressPercent').textContent = fakeProgress.toFixed(1) + '%';
                         }
-                    }, 300);
+                        const mins = Math.floor(elapsed / 60);
+                        const secs = elapsed % 60;
+                        $('statusText').textContent = `📤 Sending chunk ${i + 1}/${totalChunks} to Telegram... ${mins}:${secs.toString().padStart(2, '0')} elapsed`;
+                    }, tickInterval);
                 };
                 
                 xhr.onload = () => {
@@ -221,9 +235,10 @@ async function uploadFile(file) {
             
             // Update after TG upload complete
             $('statusText').className = '';
-            const overallProgress = (i + 1) / totalChunks;
-            $('progressBar').style.width = (overallProgress * 100).toFixed(1) + '%';
-            $('progressPercent').textContent = (overallProgress * 100).toFixed(1) + '%';
+            const chunkShare = 100 / totalChunks;
+            const overallProgress = (i + 1) * chunkShare;
+            $('progressBar').style.width = overallProgress.toFixed(1) + '%';
+            $('progressPercent').textContent = overallProgress.toFixed(1) + '%';
         }
         
         $('statusText').textContent = 'Finalizing...';
@@ -276,9 +291,43 @@ async function downloadFile(id, filename, size, numChunks) {
     $('progressContainer').style.display = 'block';
     $('progressBar').style.width = '0%';
     $('progressPercent').textContent = '0%';
-    $('statusText').textContent = `⬇️ Fetching ${numChunks} chunk${numChunks > 1 ? 's' : ''} from Telegram...`;
+    $('statusText').className = 'telegram';
+    
+    // Phase 1: Server fetches all chunks from TG (0-80% fake progress)
+    // ~5 min per chunk to download from TG
+    let fakeProgress = 0;
+    const tgFetchTarget = 80;
+    const secondsPerChunk = 300;
+    const totalFetchTime = numChunks * secondsPerChunk;
+    const incrementPerTick = tgFetchTarget / totalFetchTime;
+    let elapsed = 0;
+    
+    const fakeInterval = setInterval(() => {
+        elapsed++;
+        if (fakeProgress < tgFetchTarget - 1) {
+            fakeProgress += incrementPerTick;
+            $('progressBar').style.width = fakeProgress.toFixed(1) + '%';
+            $('progressPercent').textContent = fakeProgress.toFixed(1) + '%';
+        }
+        const mins = Math.floor(elapsed / 60);
+        const secs = elapsed % 60;
+        const currentChunk = Math.min(Math.floor(elapsed / secondsPerChunk) + 1, numChunks);
+        $('statusText').textContent = `⬇️ Preparing: chunk ${currentChunk}/${numChunks} (TG → Server)... ${mins}:${secs.toString().padStart(2, '0')}`;
+    }, 1000);
     
     try {
+        // Prepare download (server fetches all from TG)
+        const prepRes = await fetch(`/api/download/prepare/${id}`, { method: 'POST' });
+        clearInterval(fakeInterval);
+        
+        if (!prepRes.ok) throw new Error('Prepare failed');
+        
+        // Phase 2: Stream from server to browser (80-100%, smooth and fast)
+        $('statusText').className = '';
+        $('progressBar').style.width = '80%';
+        $('progressPercent').textContent = '80%';
+        $('statusText').textContent = `⬇️ Downloading to browser...`;
+        
         const res = await fetch(`/api/download/${id}`);
         if (!res.ok) throw new Error('Download failed');
         
@@ -293,16 +342,17 @@ async function downloadFile(id, filename, size, numChunks) {
             chunks.push(value);
             received += value.length;
             
-            const pct = (received / size * 100).toFixed(1);
-            $('progressBar').style.width = pct + '%';
-            $('progressPercent').textContent = pct + '%';
+            const realProgress = 80 + (received / size * 20);
+            $('progressBar').style.width = realProgress.toFixed(1) + '%';
+            $('progressPercent').textContent = realProgress.toFixed(1) + '%';
             
-            const elapsed = (Date.now() - startTime) / 1000;
-            const speed = received / elapsed;
+            const elapsedSec = (Date.now() - startTime) / 1000;
+            const speed = received / elapsedSec;
             const remaining = (size - received) / speed;
             $('statusText').textContent = `⬇️ ${formatSize(received)} / ${formatSize(size)} • ${formatSize(speed)}/s • ${formatTime(remaining)} left`;
         }
         
+        $('statusText').textContent = `💾 Saving ${filename}...`;
         const blob = new Blob(chunks);
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
@@ -312,10 +362,12 @@ async function downloadFile(id, filename, size, numChunks) {
         
         showStatus(`✅ Downloaded ${filename}`, 'success');
     } catch (err) {
+        clearInterval(fakeInterval);
         showStatus(`❌ Download failed: ${err.message}`, 'error');
     }
     
     $('statusText').textContent = '';
+    $('statusText').className = '';
     $('progressContainer').style.display = 'none';
 }
 
@@ -398,8 +450,9 @@ def finalize_upload():
     del uploads_in_progress[upload_id]
     return jsonify({'file_id': file_id})
 
-@app.route('/api/download/<int:file_id>')
-def download(file_id):
+@app.route('/api/download/prepare/<int:file_id>', methods=['POST'])
+def prepare_download(file_id):
+    """Download all chunks from TG to server, return when ready"""
     storage = get_storage()
     file_info = storage._q("SELECT filename, original_size FROM files WHERE id = ?", (file_id,), fetch='one')
     if not file_info:
@@ -408,31 +461,67 @@ def download(file_id):
     filename, original_size = file_info
     chunks = storage._q("SELECT message_id, chunk_index FROM chunks WHERE file_id = ? ORDER BY chunk_index", (file_id,), fetch='all')
     
-    def generate():
-        loop = asyncio.new_event_loop()
-        async def dl():
-            s = get_storage()
-            await s.start()
-            try:
+    output_path = Path(f"/tmp/downloads/ready_{file_id}_{filename}")
+    
+    async def download_all():
+        s = get_storage()
+        await s.start()
+        try:
+            with open(output_path, 'wb') as out:
                 for msg_id, idx in chunks:
+                    print(f"Downloading chunk {idx + 1}/{len(chunks)} from TG for file {file_id}")
                     msg = await s.client.get_messages(s.channel_id, ids=msg_id)
                     temp = Path(f"/tmp/downloads/dl_{file_id}_{idx}")
                     await s.client.download_media(msg, file=str(temp))
                     with open(temp, 'rb') as f:
-                        while data := f.read(1024 * 1024):
-                            yield data
+                        out.write(f.read())
                     temp.unlink()
+                    print(f"Chunk {idx + 1}/{len(chunks)} done")
+        finally:
+            await s.stop()
+    
+    run_async(download_all())
+    return jsonify({'ready': True, 'path': str(output_path)})
+
+@app.route('/api/download/<int:file_id>')
+def download(file_id):
+    """Stream the prepared file to browser"""
+    storage = get_storage()
+    file_info = storage._q("SELECT filename, original_size FROM files WHERE id = ?", (file_id,), fetch='one')
+    if not file_info:
+        return jsonify({'error': 'File not found'}), 404
+    
+    filename, original_size = file_info
+    output_path = Path(f"/tmp/downloads/ready_{file_id}_{filename}")
+    
+    # If not prepared, prepare now (blocking)
+    if not output_path.exists():
+        chunks = storage._q("SELECT message_id, chunk_index FROM chunks WHERE file_id = ? ORDER BY chunk_index", (file_id,), fetch='all')
+        
+        async def download_all():
+            s = get_storage()
+            await s.start()
+            try:
+                with open(output_path, 'wb') as out:
+                    for msg_id, idx in chunks:
+                        print(f"Downloading chunk {idx + 1}/{len(chunks)} from TG")
+                        msg = await s.client.get_messages(s.channel_id, ids=msg_id)
+                        temp = Path(f"/tmp/downloads/dl_{file_id}_{idx}")
+                        await s.client.download_media(msg, file=str(temp))
+                        with open(temp, 'rb') as f:
+                            out.write(f.read())
+                        temp.unlink()
             finally:
                 await s.stop()
         
-        gen = dl()
-        try:
-            while True:
-                yield loop.run_until_complete(gen.__anext__())
-        except StopAsyncIteration:
-            pass
-        finally:
-            loop.close()
+        run_async(download_all())
+    
+    def generate():
+        with open(output_path, 'rb') as f:
+            while data := f.read(1024 * 1024):
+                yield data
+        # Clean up after streaming
+        output_path.unlink()
     
     return Response(generate(), mimetype='application/octet-stream', headers={'Content-Disposition': f'attachment; filename="{filename}"', 'Content-Length': str(original_size)})
 
