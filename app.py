@@ -159,35 +159,62 @@ async function uploadFile(file) {
                 formData.append('filename', file.name);
                 formData.append('total_size', file.size);
                 
+                let tgInterval = null;
+                let fakeProgress = 0;
+                
                 xhr.upload.onprogress = e => {
                     if (e.lengthComputable) {
-                        $('statusText').className = ''; // Remove telegram animation
+                        $('statusText').className = '';
                         const chunkProgress = e.loaded / e.total;
-                        const overallProgress = (i + chunkProgress * 0.5) / totalChunks; // 50% for upload to Railway
+                        const overallProgress = (i + chunkProgress * 0.5) / totalChunks;
                         const pct = (overallProgress * 100).toFixed(1);
                         $('progressBar').style.width = pct + '%';
                         $('progressPercent').textContent = pct + '%';
                         
                         const elapsed = (Date.now() - startTime) / 1000;
                         const speed = (i * CHUNK_SIZE + e.loaded) / elapsed;
-                        const remaining = (file.size - (i * CHUNK_SIZE + e.loaded)) / speed * 2; // *2 for TG phase
+                        const remaining = (file.size - (i * CHUNK_SIZE + e.loaded)) / speed * 2;
                         $('statusText').textContent = `⬆️ Chunk ${i + 1}/${totalChunks} → Server: ${formatSize(speed)}/s • ~${formatTime(remaining)} left`;
                     }
                 };
                 
+                // When browser→Railway upload completes, start fake progress animation
+                xhr.upload.onload = () => {
+                    const baseProgress = (i + 0.5) / totalChunks * 100;
+                    const targetProgress = (i + 0.95) / totalChunks * 100;
+                    fakeProgress = baseProgress;
+                    
+                    $('statusText').className = 'telegram';
+                    $('statusText').textContent = `📤 Sending chunk ${i + 1}/${totalChunks} to Telegram...`;
+                    
+                    tgInterval = setInterval(() => {
+                        if (fakeProgress < targetProgress) {
+                            fakeProgress += 0.2;
+                            $('progressBar').style.width = fakeProgress.toFixed(1) + '%';
+                            $('progressPercent').textContent = fakeProgress.toFixed(1) + '%';
+                        }
+                    }, 300);
+                };
+                
                 xhr.onload = () => {
+                    if (tgInterval) clearInterval(tgInterval);
                     if (xhr.status === 200) {
-                        // Phase 2: Show Telegram upload status with animation
-                        const overallProgress = (i + 0.5) / totalChunks;
-                        $('progressBar').style.width = (overallProgress * 100).toFixed(1) + '%';
-                        $('statusText').className = 'telegram';
-                        $('statusText').textContent = `📤 Sending chunk ${i + 1}/${totalChunks} to Telegram... (this takes a minute)`;
                         resolve(JSON.parse(xhr.response));
                     } else {
-                        reject(new Error(xhr.responseText || 'Upload failed'));
+                        let errMsg = 'Upload failed';
+                        try {
+                            const errJson = JSON.parse(xhr.responseText);
+                            errMsg = errJson.error || errMsg;
+                        } catch(e) {
+                            errMsg = xhr.responseText || errMsg;
+                        }
+                        reject(new Error(errMsg));
                     }
                 };
-                xhr.onerror = () => reject(new Error('Network error'));
+                xhr.onerror = () => {
+                    if (tgInterval) clearInterval(tgInterval);
+                    reject(new Error('Network error'));
+                };
                 xhr.open('POST', '/api/upload/chunk');
                 xhr.send(formData);
             });
@@ -335,13 +362,22 @@ def upload_chunk():
         storage = get_storage()
         await storage.start()
         try:
+            print(f"Uploading chunk {chunk_index + 1}/{total_chunks} to Telegram...")
             msg = await storage.client.send_file(storage.channel_id, chunk_path, caption=f"📦 {filename} | {chunk_index + 1}/{total_chunks} | {upload_id}")
+            print(f"Chunk {chunk_index + 1} uploaded successfully, msg_id: {msg.id}")
             return msg.id
+        except Exception as e:
+            print(f"ERROR uploading to Telegram: {e}")
+            raise
         finally:
             await storage.stop()
             if chunk_path.exists(): chunk_path.unlink()
     
-    msg_id = run_async(send_to_tg())
+    try:
+        msg_id = run_async(send_to_tg())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
     upload['tg_chunks'].append((chunk_index, msg_id, chunk_size))
     return jsonify({'status': 'ok', 'chunk': chunk_index + 1, 'total': total_chunks})
 
